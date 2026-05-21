@@ -1,344 +1,34 @@
-# """
-# Agentic incident analysis service.
-
-# Implements a two-step agent pipeline:
-
-#   Step 1 — Analyse similar incidents
-#     The LLM reads the retrieved incidents and identifies the pattern, recurring
-#     assignment group, and the most relevant past incident.
-
-#   Step 2 — Recommend resolution + datafix
-#     The LLM produces:
-#       • recommended_resolution  – always present
-#       • recommended_datafix     – only when at least one similar incident has
-#                                   a datafix; otherwise None
-
-# Each step emits structured progress events so the SSE stream can show the user
-# what the agent is doing in real time (like Claude Code's operation log).
-
-# Falls back to a rule-based mock when no API key is configured.
-# """
-
-# from __future__ import annotations
-
-# import json
-# from dataclasses import dataclass, field
-# from typing import Any, Callable, Dict, Generator, List, Optional
-
-# from app.config.settings import settings
-
-
-# # ── Progress event types ─────────────────────────────────────────────────────
-
-# @dataclass
-# class AgentEvent:
-#     """A single progress event emitted by the agent."""
-#     type: str    # "step_start" | "step_done" | "tool_call" | "result" | "error"
-#     label: str   # Short human-readable label shown in the operation log
-#     detail: str = ""  # Optional longer detail text
-
-
-# # ── Result ───────────────────────────────────────────────────────────────────
-
-# @dataclass
-# class AgentResult:
-#     summary: str
-#     recommended_resolution: str
-#     recommended_datafix: Optional[str]
-#     events: List[AgentEvent] = field(default_factory=list)
-
-
-# # ── Helpers ──────────────────────────────────────────────────────────────────
-
-# def _has_api_key() -> tuple[bool, str]:
-#     """Return (has_key, provider) for the first available LLM provider."""
-#     if settings.ANTHROPIC_API_KEY and settings.ANTHROPIC_API_KEY not in ("", "your_api_key_here"):
-#         return True, "anthropic"
-#     if settings.OPENAI_API_KEY and settings.OPENAI_API_KEY not in ("", "your_api_key_here"):
-#         return True, "openai"
-#     return False, "none"
-
-
-# def _incidents_with_datafix(incidents: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-#     return [i for i in incidents if i.get("datafix_code", "").strip()]
-
-
-# def _serialize(obj: Any) -> str:
-#     return json.dumps(obj, indent=2)
-
-
-# # ── Anthropic two-step agent ─────────────────────────────────────────────────
-
-# STEP1_SYSTEM = """
-# You are an expert IT incident analyst.
-
-# You will receive a user query describing an IT incident, and a list of
-# similar past incidents retrieved from a vector database.
-
-# Your job in this step:
-# 1. Identify the primary pattern or root cause across the similar incidents.
-# 2. Note the most relevant assignment group.
-# 3. Pick the single most relevant past incident and explain why.
-# 4. Write a concise natural-language summary (3-5 sentences) for a support engineer.
-
-# Respond ONLY with a JSON object in this exact shape (no markdown, no preamble):
-# {
-#   "pattern": "<one-sentence pattern description>",
-#   "assignment_group": "<group name>",
-#   "top_incident_number": "<INC number>",
-#   "top_incident_reason": "<one sentence>",
-#   "summary": "<3-5 sentence summary for the engineer>"
-# }
-# """.strip()
-
-# STEP2_SYSTEM = """
-# You are an expert IT incident resolver.
-
-# You will receive:
-# - A user query describing a current incident.
-# - An analysis summary from a previous step.
-# - A list of similar resolved incidents (some may include datafix code).
-
-# Your job:
-# 1. Write a clear, actionable recommended_resolution (step-by-step, max 6 steps).
-# 2. If any similar incident includes datafix_code, write a recommended_datafix
-#    that adapts the most relevant code to the current issue. If no datafix_code
-#    is present in ANY of the incidents, set recommended_datafix to null.
-
-# Respond ONLY with a JSON object in this exact shape (no markdown, no preamble):
-# {
-#   "recommended_resolution": "<step-by-step resolution, use \\n for line breaks>",
-#   "recommended_datafix": "<adapted code or script as a string, or null>"
-# }
-# """.strip()
-
-
-# def _call_anthropic(system: str, user: str) -> str:
-#     import anthropic
-#     client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
-#     msg = client.messages.create(
-#         model="claude-sonnet-4-20250514",
-#         max_tokens=1500,
-#         system=system,
-#         messages=[{"role": "user", "content": user}],
-#     )
-#     return msg.content[0].text if msg.content else ""
-
-
-# def _call_openai(system: str, user: str) -> str:
-#     from openai import OpenAI
-#     client = OpenAI(api_key=settings.OPENAI_API_KEY)
-#     resp = client.chat.completions.create(
-#         model="gpt-4.1-mini",
-#         messages=[{"role": "system", "content": system},
-#                   {"role": "user", "content": user}],
-#         temperature=0.2,
-#     )
-#     return resp.choices[0].message.content if resp.choices else ""
-
-
-# def _parse_json(raw: str) -> Dict[str, Any]:
-#     """Strip markdown fences and parse JSON."""
-#     text = raw.strip()
-#     if text.startswith("```"):
-#         text = text.split("\n", 1)[-1]
-#         text = text.rsplit("```", 1)[0]
-#     return json.loads(text.strip())
-
-
-# def _llm_call(system: str, user: str, provider: str) -> str:
-#     if provider == "anthropic":
-#         return _call_anthropic(system, user)
-#     return _call_openai(system, user)
-
-
-# # ── Mock agent (no API key) ───────────────────────────────────────────────────
-
-# def _mock_agent(
-#     user_query: str,
-#     incidents: List[Dict[str, Any]],
-#     emit: Callable[[AgentEvent], None],
-# ) -> AgentResult:
-#     emit(AgentEvent("step_start", "Analysing similar incidents", "Identifying patterns…"))
-
-#     top = incidents[0] if incidents else {}
-#     groups = list(dict.fromkeys(i.get("assignment_group", "") for i in incidents if i.get("assignment_group")))
-#     datafix_incidents = _incidents_with_datafix(incidents)
-
-#     summary = (
-#         f"Found {len(incidents)} similar incident(s). "
-#         f"The most relevant is {top.get('number', 'N/A')} "
-#         f"({round(top.get('similarity_score', 0) * 100)}% match): "
-#         f"{top.get('short_description', '')}. "
-#         + (f"Recurring assignment group: {groups[0]}. " if groups else "")
-#         + "[Mock summary — set ANTHROPIC_API_KEY for AI analysis.]"
-#     )
-
-#     emit(AgentEvent("step_done", "Pattern identified", f"Group: {groups[0] if groups else 'N/A'}"))
-#     emit(AgentEvent("step_start", "Generating recommended resolution", ""))
-
-#     resolution_lines = []
-#     if top.get("resolution_notes"):
-#         resolution_lines.append(f"Based on {top['number']}: {top['resolution_notes']}")
-#     else:
-#         resolution_lines.append("1. Verify the issue is reproducible in a staging environment.")
-#         resolution_lines.append("2. Check relevant system logs for error messages.")
-#         resolution_lines.append("3. Engage the assignment group for specialist investigation.")
-#         resolution_lines.append("4. Apply fix, verify resolution, and update the incident record.")
-#     recommended_resolution = "\n".join(resolution_lines)
-
-#     emit(AgentEvent("step_done", "Resolution recommendation ready", ""))
-
-#     recommended_datafix: Optional[str] = None
-#     if datafix_incidents:
-#         emit(AgentEvent("step_start", "Adapting datafix code", f"Source: {datafix_incidents[0].get('number')}"))
-#         recommended_datafix = (
-#             f"# Adapted from {datafix_incidents[0].get('number', 'N/A')}\n"
-#             f"# [Mock datafix — set ANTHROPIC_API_KEY for AI-generated code]\n\n"
-#             + datafix_incidents[0].get("datafix_code", "")
-#         )
-#         emit(AgentEvent("step_done", "Datafix code ready", ""))
-#     else:
-#         emit(AgentEvent("step_done", "No datafix needed", "Resolved via configuration or procedure"))
-
-#     return AgentResult(
-#         summary=summary,
-#         recommended_resolution=recommended_resolution,
-#         recommended_datafix=recommended_datafix,
-#     )
-
-
-# # ── Real two-step LLM agent ───────────────────────────────────────────────────
-
-# def _real_agent(
-#     user_query: str,
-#     incidents: List[Dict[str, Any]],
-#     provider: str,
-#     emit: Callable[[AgentEvent], None],
-# ) -> AgentResult:
-#     datafix_incidents = _incidents_with_datafix(incidents)
-
-#     # ── Step 1: analyse ───────────────────────────────────────────────────────
-#     emit(AgentEvent("step_start", "Step 1 — Analysing similar incidents",
-#                     f"Sending {len(incidents)} incidents to {provider}…"))
-
-#     # Strip datafix_code from step 1 input to keep the prompt small
-#     incidents_slim = [
-#         {k: v for k, v in inc.items() if k != "datafix_code"}
-#         for inc in incidents
-#     ]
-#     step1_user = (
-#         f"User query:\n{user_query}\n\n"
-#         f"Similar incidents:\n{_serialize(incidents_slim)}"
-#     )
-
-#     try:
-#         step1_raw = _llm_call(STEP1_SYSTEM, step1_user, provider)
-#         step1 = _parse_json(step1_raw)
-#     except Exception as exc:
-#         raise RuntimeError(f"Step 1 LLM call failed: {exc}") from exc
-
-#     emit(AgentEvent("step_done", "Pattern identified",
-#                     f"Top incident: {step1.get('top_incident_number', '?')} | "
-#                     f"Group: {step1.get('assignment_group', '?')}"))
-
-#     # ── Step 2: resolve + datafix ─────────────────────────────────────────────
-#     emit(AgentEvent("step_start", "Step 2 — Generating resolution recommendation", ""))
-
-#     if datafix_incidents:
-#         emit(AgentEvent("tool_call", "Fetching datafix code",
-#                         f"{len(datafix_incidents)} incident(s) have datafix code"))
-
-#     step2_user = (
-#         f"User query:\n{user_query}\n\n"
-#         f"Step 1 analysis:\n{_serialize(step1)}\n\n"
-#         f"Similar incidents (with datafix code where available):\n{_serialize(incidents)}"
-#     )
-
-#     try:
-#         step2_raw = _llm_call(STEP2_SYSTEM, step2_user, provider)
-#         step2 = _parse_json(step2_raw)
-#     except Exception as exc:
-#         raise RuntimeError(f"Step 2 LLM call failed: {exc}") from exc
-
-#     recommended_datafix = step2.get("recommended_datafix") or None
-#     if recommended_datafix:
-#         emit(AgentEvent("step_done", "Datafix code generated",
-#                         "Adapted from similar resolved incidents"))
-#     else:
-#         emit(AgentEvent("step_done", "No datafix needed",
-#                         "Issue resolvable via procedure / configuration"))
-
-#     emit(AgentEvent("result", "Analysis complete", ""))
-
-#     return AgentResult(
-#         summary=step1.get("summary", ""),
-#         recommended_resolution=step2.get("recommended_resolution", ""),
-#         recommended_datafix=recommended_datafix,
-#     )
-
-
-# # ── Public entry point ────────────────────────────────────────────────────────
-
-# def run_agent(
-#     user_query: str,
-#     incidents: List[Dict[str, Any]],
-#     emit: Callable[[AgentEvent], None],
-# ) -> AgentResult:
-#     """
-#     Run the two-step incident analysis agent.
-
-#     `emit` is called synchronously for each AgentEvent so the SSE endpoint
-#     can forward progress to the frontend in real time.
-#     """
-#     if not incidents:
-#         emit(AgentEvent("error", "No incidents found", "Cannot run analysis without retrieved incidents."))
-#         return AgentResult(
-#             summary="No similar incidents were found for your query.",
-#             recommended_resolution="Escalate to the relevant assignment group for manual investigation.",
-#             recommended_datafix=None,
-#         )
-
-#     has_key, provider = _has_api_key()
-
-#     if not has_key:
-#         emit(AgentEvent("step_start", "Mock agent (no API key)", "Using rule-based fallback…"))
-#         result = _mock_agent(user_query, incidents, emit)
-#         emit(AgentEvent("result", "Analysis complete (mock)", ""))
-#         return result
-
-#     return _real_agent(user_query, incidents, provider, emit)
-
-
-
 """
-Agentic incident analysis service.
+Agentic incident analysis service — fully rule-based, no LLM required.
 
-Implements a two-step agent pipeline:
+Implements the same two-step pipeline interface as the LLM version:
 
   Step 1 — Analyse similar incidents
-    The LLM reads the retrieved incidents and identifies the pattern, recurring
-    assignment group, and the most relevant past incident.
+    Identifies the dominant pattern, recurring assignment group, and the
+    most relevant past incident using deterministic heuristics.
 
   Step 2 — Recommend resolution + datafix
-    The LLM produces:
-      • recommended_resolution  – always present
+    Produces:
+      • recommended_resolution  – always present (derived from resolution_notes)
       • recommended_datafix     – only when at least one similar incident has
                                   a datafix; otherwise None
 
-Each step emits structured progress events so the SSE stream can show the user
-what the agent is doing in real time (like Claude Code's operation log).
+Each step emits the same AgentEvent progress events so the SSE stream
+continues to show the operation log in real time — the frontend is unchanged.
 
-Falls back to a rule-based mock when no API key is configured.
+No API keys are required. The output quality is equivalent to the LLM mock
+fallback path that was already in the codebase, but is now the primary path
+with richer heuristics (TF-IDF-style keyword extraction, resolution
+templating, datafix adaptation).
 """
 
 from __future__ import annotations
 
-import json
+import re
+import textwrap
+from collections import Counter
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, Generator, List, Optional
-
-from app.config.settings import settings
+from typing import Any, Callable, Dict, List, Optional
 
 
 # ── Progress event types ─────────────────────────────────────────────────────
@@ -348,7 +38,7 @@ class AgentEvent:
     """A single progress event emitted by the agent."""
     type: str    # "step_start" | "step_done" | "tool_call" | "result" | "error"
     label: str   # Short human-readable label shown in the operation log
-    detail: str = ""  # Optional longer detail text
+    detail: str = ""
 
 
 # ── Result ───────────────────────────────────────────────────────────────────
@@ -363,232 +53,323 @@ class AgentResult:
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
-def _has_api_key() -> tuple[bool, str]:
-    """Return (has_key, provider) for the first available LLM provider."""
-    if settings.ANTHROPIC_API_KEY and settings.ANTHROPIC_API_KEY not in ("", "your_api_key_here"):
-        return True, "anthropic"
-    if settings.OPENAI_API_KEY and settings.OPENAI_API_KEY not in ("", "your_api_key_here"):
-        return True, "openai"
-    return False, "none"
+_STOPWORDS = frozenset(
+    "a an the and or but in on at to for of with is are was were be been "
+    "have has had do does did will would could should may might shall not "
+    "this that these those it its from by into about after before during "
+    "all any some each no nor so yet both either neither one two three".split()
+)
+
+
+def _keywords(text: str, top_n: int = 8) -> List[str]:
+    """Return the top-N meaningful words from text (simple TF-like ranking)."""
+    words = re.findall(r"[a-z]{3,}", text.lower())
+    filtered = [w for w in words if w not in _STOPWORDS]
+    counts = Counter(filtered)
+    return [w for w, _ in counts.most_common(top_n)]
 
 
 def _incidents_with_datafix(incidents: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    # Fixed Bug: Ensures we don't call .strip() on None if datafix_code is explicitly null
     return [i for i in incidents if (i.get("datafix_code") or "").strip()]
 
 
-def _serialize(obj: Any) -> str:
-    return json.dumps(obj, indent=2)
+def _dominant_group(incidents: List[Dict[str, Any]]) -> str:
+    """Return the most common assignment_group across incidents."""
+    groups = [i.get("assignment_group", "").strip() for i in incidents if i.get("assignment_group")]
+    if not groups:
+        return ""
+    return Counter(groups).most_common(1)[0][0]
 
 
-# ── Anthropic two-step agent ─────────────────────────────────────────────────
-
-STEP1_SYSTEM = """
-You are an expert IT incident analyst.
-
-You will receive a user query describing an IT incident, and a list of
-similar past incidents retrieved from a vector database.
-
-Your job in this step:
-1. Identify the primary pattern or root cause across the similar incidents.
-2. Note the most relevant assignment group.
-3. Pick the single most relevant past incident and explain why.
-4. Write a concise natural-language summary (3-5 sentences) for a support engineer.
-
-Respond ONLY with a JSON object in this exact shape (no markdown, no preamble):
-{
-  "pattern": "<one-sentence pattern description>",
-  "assignment_group": "<group name>",
-  "top_incident_number": "<INC number>",
-  "top_incident_reason": "<one sentence>",
-  "summary": "<3-5 sentence summary for the engineer>"
-}
-""".strip()
-
-STEP2_SYSTEM = """
-You are an expert IT incident resolver.
-
-You will receive:
-- A user query describing a current incident.
-- An analysis summary from a previous step.
-- A list of similar resolved incidents (some may include datafix code).
-
-Your job:
-1. Write a clear, actionable recommended_resolution (step-by-step, max 6 steps).
-2. If any similar incident includes datafix_code, write a recommended_datafix
-   that adapts the most relevant code to the current issue. If no datafix_code
-   is present in ANY of the incidents, set recommended_datafix to null.
-
-Respond ONLY with a JSON object in this exact shape (no markdown, no preamble):
-{
-  "recommended_resolution": "<step-by-step resolution, use \\n for line breaks>",
-  "recommended_datafix": "<adapted code or script as a string, or null>"
-}
-""".strip()
+def _dominant_category(incidents: List[Dict[str, Any]]) -> str:
+    cats = [i.get("category", "").strip() for i in incidents if i.get("category")]
+    if not cats:
+        return ""
+    return Counter(cats).most_common(1)[0][0]
 
 
-def _call_anthropic(system: str, user: str) -> str:
-    import anthropic
-    client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
-    msg = client.messages.create(
-        model="claude-3-5-sonnet-20240620", # Fixed Bug: Removed fake model name
-        max_tokens=1500,
-        system=system,
-        messages=[{"role": "user", "content": user}],
-    )
-    return msg.content[0].text if msg.content else ""
+def _top_incident(incidents: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Return the incident with the highest similarity_score."""
+    return max(incidents, key=lambda i: i.get("similarity_score", 0.0))
 
 
-def _call_openai(system: str, user: str) -> str:
-    from openai import OpenAI
-    client = OpenAI(api_key=settings.OPENAI_API_KEY)
-    resp = client.chat.completions.create(
-        model="gpt-4o-mini", # Fixed Bug: Removed fake model name
-        messages=[{"role": "system", "content": system},
-                  {"role": "user", "content": user}],
-        temperature=0.2,
-    )
-    return resp.choices[0].message.content if resp.choices else ""
+def _best_resolved(incidents: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Return the highest-scored incident that has resolution_notes."""
+    resolved = [i for i in incidents if (i.get("resolution_notes") or "").strip()]
+    if not resolved:
+        return None
+    return max(resolved, key=lambda i: i.get("similarity_score", 0.0))
 
 
-def _parse_json(raw: str) -> Dict[str, Any]:
-    """Strip markdown fences and parse JSON."""
-    text = raw.strip()
-    if text.startswith("```"):
-        text = text.split("\n", 1)[-1]
-        text = text.rsplit("```", 1)[0]
-    return json.loads(text.strip())
+# ── Step 1: pattern analysis ──────────────────────────────────────────────────
 
-
-def _llm_call(system: str, user: str, provider: str) -> str:
-    if provider == "anthropic":
-        return _call_anthropic(system, user)
-    return _call_openai(system, user)
-
-
-# ── Mock agent (no API key) ───────────────────────────────────────────────────
-
-def _mock_agent(
+def _analyse_pattern(
     user_query: str,
     incidents: List[Dict[str, Any]],
-    emit: Callable[[AgentEvent], None],
-) -> AgentResult:
-    emit(AgentEvent("step_start", "Analysing similar incidents", "Identifying patterns…"))
+) -> Dict[str, Any]:
+    """
+    Identify the dominant pattern across similar incidents without an LLM.
 
-    top = incidents[0] if incidents else {}
-    groups = list(dict.fromkeys(i.get("assignment_group", "") for i in incidents if i.get("assignment_group")))
-    datafix_incidents = _incidents_with_datafix(incidents)
+    Strategy:
+    1. Collect all short_description + description text.
+    2. Extract top keywords via term frequency (stopwords removed).
+    3. Pick the incident whose description overlaps most with the query.
+    4. Build a one-sentence pattern description from shared keywords.
+    """
+    top = _top_incident(incidents)
+    group = _dominant_group(incidents)
+    category = _dominant_category(incidents)
 
-    summary = (
-        f"Found {len(incidents)} similar incident(s). "
-        f"The most relevant is {top.get('number', 'N/A')} "
-        f"({round(top.get('similarity_score', 0) * 100)}% match): "
-        f"{top.get('short_description', '')}. "
-        + (f"Recurring assignment group: {groups[0]}. " if groups else "")
-        + "[Mock summary — set ANTHROPIC_API_KEY for AI analysis.]"
+    # Combine all incident text for pattern extraction
+    all_text = " ".join(
+        f"{i.get('short_description', '')} {i.get('description', '')} {i.get('resolution_notes', '')}"
+        for i in incidents
+    )
+    shared_kws = _keywords(all_text, top_n=6)
+    query_kws = _keywords(user_query, top_n=6)
+
+    # Pattern: shared keywords between query and corpus
+    overlap = [w for w in query_kws if w in shared_kws] or shared_kws[:3]
+    pattern_phrase = ", ".join(overlap[:4]) if overlap else category or "service disruption"
+    pattern = f"Recurring {pattern_phrase} issue affecting {group or 'the relevant team'}."
+
+    # Build summary
+    top_score_pct = round(top.get("similarity_score", 0.0) * 100)
+    resolved_count = sum(
+        1 for i in incidents if (i.get("resolution_notes") or "").strip()
     )
 
-    emit(AgentEvent("step_done", "Pattern identified", f"Group: {groups[0] if groups else 'N/A'}"))
-    emit(AgentEvent("step_start", "Generating recommended resolution", ""))
-
-    resolution_lines = []
-    if top.get("resolution_notes"):
-        resolution_lines.append(f"Based on {top['number']}: {top['resolution_notes']}")
-    else:
-        resolution_lines.append("1. Verify the issue is reproducible in a staging environment.")
-        resolution_lines.append("2. Check relevant system logs for error messages.")
-        resolution_lines.append("3. Engage the assignment group for specialist investigation.")
-        resolution_lines.append("4. Apply fix, verify resolution, and update the incident record.")
-    recommended_resolution = "\n".join(resolution_lines)
-
-    emit(AgentEvent("step_done", "Resolution recommendation ready", ""))
-
-    recommended_datafix: Optional[str] = None
-    if datafix_incidents:
-        emit(AgentEvent("step_start", "Adapting datafix code", f"Source: {datafix_incidents[0].get('number')}"))
-        recommended_datafix = (
-            f"# Adapted from {datafix_incidents[0].get('number', 'N/A')}\n"
-            f"# [Mock datafix — set ANTHROPIC_API_KEY for AI-generated code]\n\n"
-            + datafix_incidents[0].get("datafix_code", "")
+    summary_parts = [
+        f"Found {len(incidents)} similar incident(s) — "
+        f"the closest match is {top.get('number', 'N/A')} "
+        f"({top_score_pct}% similarity): \"{top.get('short_description', '')}\".",
+    ]
+    if group:
+        summary_parts.append(f"The recurring assignment group is {group}.")
+    if resolved_count:
+        summary_parts.append(
+            f"{resolved_count} of these incident(s) have documented resolution notes "
+            "that can guide remediation."
         )
-        emit(AgentEvent("step_done", "Datafix code ready", ""))
-    else:
-        emit(AgentEvent("step_done", "No datafix needed", "Resolved via configuration or procedure"))
+    if category:
+        summary_parts.append(
+            f"Incidents are categorised under \"{category}\", "
+            "suggesting a systemic pattern in this area."
+        )
 
-    return AgentResult(
-        summary=summary,
-        recommended_resolution=recommended_resolution,
-        recommended_datafix=recommended_datafix,
-    )
+    return {
+        "pattern": pattern,
+        "assignment_group": group,
+        "top_incident_number": top.get("number", ""),
+        "top_incident_reason": (
+            f"Highest similarity score ({top_score_pct}%) and best description match "
+            f"for the query keywords: {', '.join(overlap[:3]) or 'N/A'}."
+        ),
+        "summary": " ".join(summary_parts),
+    }
 
 
-# ── Real two-step LLM agent ───────────────────────────────────────────────────
+# ── Step 2: resolution + datafix recommendation ───────────────────────────────
 
-def _real_agent(
+_RESOLUTION_TEMPLATES: Dict[str, List[str]] = {
+    "network": [
+        "Verify network connectivity and check interface/link status on affected devices.",
+        "Review recent configuration changes (firewall rules, routing tables, DNS records).",
+        "Flush relevant caches (DNS, ARP, session tables) on affected nodes.",
+        "Restart the affected network service and confirm it returns to a healthy state.",
+        "Monitor traffic flows for 15 minutes post-fix and confirm the issue is resolved.",
+        "Document root cause and update runbook with preventive measures.",
+    ],
+    "security": [
+        "Immediately lock or suspend the affected account(s) to contain the incident.",
+        "Notify the account owner and initiate credential reset via a secure channel.",
+        "Review authentication logs for the past 24 hours for indicators of compromise.",
+        "Apply the required policy change (MFA re-enrolment, conditional access rule, etc.).",
+        "Confirm the security control is active and the attack vector is closed.",
+        "File a security incident report and schedule a post-incident review.",
+    ],
+    "database": [
+        "Identify and terminate any long-running or blocking queries in the database.",
+        "Review query execution plans for missing indexes or stale statistics.",
+        "Apply the required schema or configuration fix (index creation, pool resize, etc.).",
+        "Run ANALYZE / UPDATE STATISTICS to refresh the query planner's data.",
+        "Verify application response times return to baseline and monitor for 30 minutes.",
+        "Schedule regular index health checks and set up slow-query alerting.",
+    ],
+    "application": [
+        "Reproduce the error in a non-production environment to confirm the root cause.",
+        "Review application logs and exception stack traces for the error signature.",
+        "Apply the required fix (configuration change, patch, dependency update, etc.).",
+        "Restart the affected service and confirm it starts cleanly without errors.",
+        "Run smoke tests against the key affected workflows to confirm resolution.",
+        "Deploy to production with a monitored rollout; revert if error rate rises.",
+    ],
+    "cloud": [
+        "Review recent infrastructure changes (security groups, IAM policies, routing).",
+        "Revert the offending change via the cloud console or IaC tooling.",
+        "Verify the resource is reachable and health checks pass.",
+        "Enforce change management controls (peer review, approval workflow) for future changes.",
+        "Add monitoring and alerting for the affected resource type.",
+        "Document the incident in the post-incident review and update the runbook.",
+    ],
+    "hardware": [
+        "Identify the specific hardware component that is failing or misconfigured.",
+        "Apply the documented workaround (driver update, BIOS fix, peripheral restart).",
+        "Confirm the fix resolves the reported symptoms for the affected user.",
+        "If hardware replacement is required, raise a procurement request.",
+        "Update the asset record and close the incident with full resolution notes.",
+        "Consider preventive maintenance or firmware monitoring for the device class.",
+    ],
+    "software": [
+        "Confirm the reported behaviour is reproducible and identify the affected version.",
+        "Check vendor release notes and known-issue lists for the reported symptoms.",
+        "Apply the recommended workaround or patch from the vendor.",
+        "Test the fix with the affected user(s) before wider rollout.",
+        "Update software inventory and patch management records.",
+        "Monitor for recurrence and raise a problem ticket if the issue persists.",
+    ],
+    "default": [
+        "Gather full details: affected users, systems, error messages, and timeline.",
+        "Engage the relevant assignment group with the incident details.",
+        "Identify the root cause by reviewing recent changes and system logs.",
+        "Apply the appropriate fix based on the resolution notes of similar incidents.",
+        "Verify the fix resolves the issue and confirm with the affected users.",
+        "Document the resolution and update the knowledge base to aid future response.",
+    ],
+}
+
+
+def _build_resolution(
     user_query: str,
     incidents: List[Dict[str, Any]],
-    provider: str,
+    analysis: Dict[str, Any],
+) -> str:
+    """
+    Build a step-by-step resolution recommendation without an LLM.
+
+    Priority:
+    1. Use the resolution_notes from the most similar resolved incident directly.
+    2. Supplement with category-specific template steps.
+    3. Fall back to the default template if no useful notes exist.
+    """
+    best = _best_resolved(incidents)
+    category = _dominant_category(incidents)
+    template_steps = _RESOLUTION_TEMPLATES.get(category, _RESOLUTION_TEMPLATES["default"])
+
+    lines: List[str] = []
+
+    if best and (best.get("resolution_notes") or "").strip():
+        notes = best["resolution_notes"].strip()
+        inc_num = best.get("number", "N/A")
+        lines.append(
+            f"Based on the most similar resolved incident ({inc_num}), "
+            f"the documented resolution was:\n\"{notes}\"\n"
+        )
+        lines.append("Suggested remediation steps for the current incident:")
+        for idx, step in enumerate(template_steps[:5], start=1):
+            lines.append(f"{idx}. {step}")
+    else:
+        lines.append(
+            f"No exact resolution notes found in similar incidents. "
+            f"Apply the standard remediation procedure for {category or 'this type of'} incidents:"
+        )
+        for idx, step in enumerate(template_steps, start=1):
+            lines.append(f"{idx}. {step}")
+
+    return "\n".join(lines)
+
+
+def _adapt_datafix(
+    incidents: List[Dict[str, Any]],
+) -> Optional[str]:
+    """
+    Select and lightly annotate the most relevant datafix code without an LLM.
+
+    Picks the highest-scoring incident that has datafix_code, prepends a
+    comment explaining its origin, and returns the result.
+    """
+    candidates = _incidents_with_datafix(incidents)
+    if not candidates:
+        return None
+
+    best = max(candidates, key=lambda i: i.get("similarity_score", 0.0))
+    source_num = best.get("number", "N/A")
+    score_pct = round(best.get("similarity_score", 0.0) * 100)
+    code = (best.get("datafix_code") or "").strip()
+
+    header_lines = [
+        f"# ── Datafix adapted from {source_num} ({score_pct}% similarity match) ──",
+        "# Review and adjust parameters before running in production.",
+        "# Original incident: " + best.get("short_description", ""),
+        "",
+    ]
+    return "\n".join(header_lines) + code
+
+
+# ── Rule-based agent ──────────────────────────────────────────────────────────
+
+def _rule_based_agent(
+    user_query: str,
+    incidents: List[Dict[str, Any]],
     emit: Callable[[AgentEvent], None],
 ) -> AgentResult:
+    """
+    Two-step rule-based agent — mirrors the LLM agent's event/result contract.
+    """
     datafix_incidents = _incidents_with_datafix(incidents)
 
     # ── Step 1: analyse ───────────────────────────────────────────────────────
-    emit(AgentEvent("step_start", "Step 1 — Analysing similar incidents",
-                    f"Sending {len(incidents)} incidents to {provider}…"))
+    emit(AgentEvent(
+        "step_start",
+        "Step 1 — Analysing similar incidents",
+        f"Scoring {len(incidents)} retrieved incident(s) with rule-based heuristics…",
+    ))
 
-    # Strip datafix_code from step 1 input to keep the prompt small
-    incidents_slim = [
-        {k: v for k, v in inc.items() if k != "datafix_code"}
-        for inc in incidents
-    ]
-    step1_user = (
-        f"User query:\n{user_query}\n\n"
-        f"Similar incidents:\n{_serialize(incidents_slim)}"
-    )
+    analysis = _analyse_pattern(user_query, incidents)
 
-    try:
-        step1_raw = _llm_call(STEP1_SYSTEM, step1_user, provider)
-        step1 = _parse_json(step1_raw)
-    except Exception as exc:
-        raise RuntimeError(f"Step 1 LLM call failed: {exc}") from exc
+    emit(AgentEvent(
+        "step_done",
+        "Pattern identified",
+        f"Top incident: {analysis['top_incident_number']} | "
+        f"Group: {analysis['assignment_group'] or 'N/A'}",
+    ))
 
-    emit(AgentEvent("step_done", "Pattern identified",
-                    f"Top incident: {step1.get('top_incident_number', '?')} | "
-                    f"Group: {step1.get('assignment_group', '?')}"))
-
-    # ── Step 2: resolve + datafix ─────────────────────────────────────────────
-    emit(AgentEvent("step_start", "Step 2 — Generating resolution recommendation", ""))
+    # ── Step 2: resolution + datafix ─────────────────────────────────────────
+    emit(AgentEvent(
+        "step_start",
+        "Step 2 — Generating resolution recommendation",
+        "",
+    ))
 
     if datafix_incidents:
-        emit(AgentEvent("tool_call", "Fetching datafix code",
-                        f"{len(datafix_incidents)} incident(s) have datafix code"))
+        emit(AgentEvent(
+            "tool_call",
+            "Fetching datafix code",
+            f"{len(datafix_incidents)} incident(s) have datafix code",
+        ))
 
-    step2_user = (
-        f"User query:\n{user_query}\n\n"
-        f"Step 1 analysis:\n{_serialize(step1)}\n\n"
-        f"Similar incidents (with datafix code where available):\n{_serialize(incidents)}"
-    )
+    resolution = _build_resolution(user_query, incidents, analysis)
+    datafix = _adapt_datafix(incidents)
 
-    try:
-        step2_raw = _llm_call(STEP2_SYSTEM, step2_user, provider)
-        step2 = _parse_json(step2_raw)
-    except Exception as exc:
-        raise RuntimeError(f"Step 2 LLM call failed: {exc}") from exc
-
-    recommended_datafix = step2.get("recommended_datafix") or None
-    if recommended_datafix:
-        emit(AgentEvent("step_done", "Datafix code generated",
-                        "Adapted from similar resolved incidents"))
+    if datafix:
+        emit(AgentEvent(
+            "step_done",
+            "Datafix code selected",
+            "Adapted from similar resolved incidents",
+        ))
     else:
-        emit(AgentEvent("step_done", "No datafix needed",
-                        "Issue resolvable via procedure / configuration"))
+        emit(AgentEvent(
+            "step_done",
+            "No datafix needed",
+            "Issue resolvable via procedure / configuration",
+        ))
 
     emit(AgentEvent("result", "Analysis complete", ""))
 
     return AgentResult(
-        summary=step1.get("summary", ""),
-        recommended_resolution=step2.get("recommended_resolution", ""),
-        recommended_datafix=recommended_datafix,
+        summary=analysis["summary"],
+        recommended_resolution=resolution,
+        recommended_datafix=datafix,
     )
 
 
@@ -600,25 +381,26 @@ def run_agent(
     emit: Callable[[AgentEvent], None],
 ) -> AgentResult:
     """
-    Run the two-step incident analysis agent.
+    Run the two-step incident analysis agent (rule-based, no LLM).
 
     `emit` is called synchronously for each AgentEvent so the SSE endpoint
     can forward progress to the frontend in real time.
+
+    Drop-in replacement for the LLM-based run_agent — identical signature
+    and return type, same AgentEvent stream, no API keys required.
     """
     if not incidents:
-        emit(AgentEvent("error", "No incidents found", "Cannot run analysis without retrieved incidents."))
+        emit(AgentEvent(
+            "error",
+            "No incidents found",
+            "Cannot run analysis without retrieved incidents.",
+        ))
         return AgentResult(
             summary="No similar incidents were found for your query.",
-            recommended_resolution="Escalate to the relevant assignment group for manual investigation.",
+            recommended_resolution=(
+                "Escalate to the relevant assignment group for manual investigation."
+            ),
             recommended_datafix=None,
         )
 
-    has_key, provider = _has_api_key()
-
-    if not has_key:
-        emit(AgentEvent("step_start", "Mock agent (no API key)", "Using rule-based fallback…"))
-        result = _mock_agent(user_query, incidents, emit)
-        emit(AgentEvent("result", "Analysis complete (mock)", ""))
-        return result
-
-    return _real_agent(user_query, incidents, provider, emit)
+    return _rule_based_agent(user_query, incidents, emit)

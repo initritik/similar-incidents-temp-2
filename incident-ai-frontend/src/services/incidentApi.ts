@@ -7,8 +7,8 @@ import type {
 } from "@/types/incident";
 
 const API_BASE_URL =
-  import.meta.env.VITE_API_BASE_URL ?? "https://similar-incidents-temp-1.onrender.com";
-  // "http://localhost:8000"; // for local development
+  // import.meta.env.VITE_API_BASE_URL ?? "https://similar-incidents-temp-1.onrender.com";
+  "http://localhost:8000"; // for local development
 
 // How long to wait for the full SSE stream to complete.
 // Render free-tier backends cold-start in up to 60 s, so 120 s is safe.

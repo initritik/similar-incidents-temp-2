@@ -1,0 +1,183 @@
+@import url('https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,500;0,600;1,400;1,500&family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;1,9..40,300;1,9..40,400&family=JetBrains+Mono:wght@400;500&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    /* ── Royal London Brand Palette ── */
+    /* Primary: Deep Royal Purple #470054 */
+    --rl-purple-950: 293 100% 16%;   /* #470054 – brand anchor */
+    --rl-purple-900: 293 90%  20%;   /* slightly lifted */
+    --rl-purple-800: 293 70%  27%;
+    --rl-purple-700: 293 55%  36%;
+    --rl-purple-400: 293 45%  62%;
+    --rl-purple-200: 293 35%  82%;
+    --rl-purple-50:  293 30%  96%;
+
+    /* Gold accent – prestige, warmth */
+    --rl-gold-500: 43 80% 52%;   /* #D4A017 */
+    --rl-gold-400: 43 85% 62%;   /* lighter gold */
+    --rl-gold-300: 43 90% 74%;
+    --rl-gold-100: 43 75% 92%;
+
+    /* Neutral ink scale */
+    --rl-ink-950: 240 15% 8%;
+    --rl-ink-900: 240 12% 11%;
+    --rl-ink-800: 240 10% 15%;
+    --rl-ink-700: 240  8% 20%;
+    --rl-ink-600: 240  6% 28%;
+    --rl-ink-500: 240  5% 40%;
+    --rl-ink-400: 240  4% 55%;
+    --rl-ink-300: 240  4% 70%;
+    --rl-ink-200: 240  3% 82%;
+    --rl-ink-100: 240  3% 92%;
+    --rl-ink-50:  240  2% 97%;
+
+    /* Tailwind semantic aliases */
+    --background:        var(--rl-ink-950);
+    --foreground:        var(--rl-ink-100);
+    --card:              var(--rl-ink-900);
+    --card-foreground:   var(--rl-ink-100);
+    --primary:           var(--rl-purple-950);
+    --primary-foreground: 0 0% 100%;
+    --muted:             var(--rl-ink-800);
+    --muted-foreground:  var(--rl-ink-400);
+    --border:            var(--rl-ink-700);
+    --border-subtle:     var(--rl-ink-800);
+    --input:             var(--rl-ink-800);
+    --ring:              var(--rl-gold-400);
+    --radius:            0.75rem;
+
+    /* Surfaces */
+    --surface-0: var(--rl-ink-950);
+    --surface-1: var(--rl-ink-900);
+    --surface-2: var(--rl-ink-800);
+    --surface-3: var(--rl-ink-700);
+
+    /* Brand accent shortcuts */
+    --accent-gold:   var(--rl-gold-500);
+    --accent-gold-l: var(--rl-gold-300);
+    --accent-purple: var(--rl-purple-800);
+    --accent-purple-l: var(--rl-purple-400);
+  }
+
+  * {
+    @apply border-border;
+    box-sizing: border-box;
+  }
+
+  html {
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+    font-family: 'DM Sans', system-ui, sans-serif;
+    font-size: 15px;
+    line-height: 1.6;
+    background-color: hsl(var(--background));
+  }
+
+  ::selection {
+    background: hsl(var(--rl-gold-400) / 0.28);
+    color: hsl(var(--foreground));
+  }
+
+  ::-webkit-scrollbar { width: 4px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb {
+    background: hsl(var(--rl-ink-700));
+    border-radius: 99px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: hsl(var(--rl-ink-500));
+  }
+}
+
+@layer utilities {
+  .font-serif {
+    font-family: 'Playfair Display', Georgia, serif;
+  }
+  .font-mono {
+    font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  }
+
+  /* Royal gold shimmer text */
+  .gold-text {
+    background: linear-gradient(
+      105deg,
+      hsl(43 80% 45%) 0%,
+      hsl(43 90% 68%) 45%,
+      hsl(43 75% 52%) 100%
+    );
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+
+  /* Subtle purple-to-gold gradient for headings */
+  .royal-gradient-text {
+    background: linear-gradient(
+      120deg,
+      hsl(var(--rl-purple-400)) 0%,
+      hsl(var(--rl-gold-400)) 100%
+    );
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+
+  /* Gold shimmer sweep animation */
+  @keyframes gold-shimmer {
+    0%   { background-position: -200% center; }
+    100% { background-position: 200% center; }
+  }
+
+  @keyframes fade-up {
+    from { opacity: 0; transform: translateY(8px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+  .animate-fade-up {
+    animation: fade-up 0.3s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  }
+
+  @keyframes typing-dot {
+    0%, 60%, 100% { transform: translateY(0);   opacity: 0.35; }
+    30%            { transform: translateY(-4px); opacity: 1; }
+  }
+
+  /* Sidebar active indicator */
+  .sidebar-item {
+    position: relative;
+    transition: all 0.18s ease;
+  }
+  .sidebar-item::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 2px;
+    height: 0;
+    background: linear-gradient(180deg, hsl(var(--rl-gold-400)), hsl(var(--rl-gold-300)));
+    border-radius: 99px;
+    transition: height 0.2s ease;
+  }
+  .sidebar-item:hover::before,
+  .sidebar-item.active::before {
+    height: 65%;
+  }
+
+  /* Gold border shimmer for active chat item */
+  @keyframes border-pulse {
+    0%, 100% { border-color: hsl(var(--rl-gold-400) / 0.3); }
+    50%       { border-color: hsl(var(--rl-gold-400) / 0.6); }
+  }
+  .border-gold-pulse {
+    animation: border-pulse 2s ease-in-out infinite;
+  }
+}

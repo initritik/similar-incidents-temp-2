@@ -45,6 +45,7 @@ app.add_middleware(
         "http://localhost:5174",
         "http://localhost:3000",
         "http://localhost:8000",
+        "https://similar-incidents-temp-2.vercel.app",
     ],
     # allow_origins=[
     #     "https://similar-incidents-temp-1.vercel.app",

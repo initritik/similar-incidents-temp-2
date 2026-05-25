@@ -1,5 +1,5 @@
 """
-Semantic similarity search endpoint.
+Lexical similarity search endpoint.
 """
 
 from typing import Any, Dict, List, Optional
@@ -56,7 +56,7 @@ def _map_result(raw: Dict[str, Any]) -> SimilarIncidentResult:
 def search_similar_incidents_endpoint(
     request: SimilarIncidentSearchRequest,
 ) -> SimilarIncidentSearchResponse:
-    """Search Qdrant for incidents semantically similar to the query."""
+    """Search incidents using deterministic word and phrase matching."""
 
     query_text = request.query_text.strip()
 

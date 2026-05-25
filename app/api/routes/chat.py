@@ -395,7 +395,7 @@ async def _stream_chat(request: IncidentChatRequest) -> AsyncGenerator[str, None
                              "detail": user_query[:120]})
 
     # ── Similarity search ─────────────────────────────────────────────────────
-    yield _sse("progress", {"type": "step_start", "label": "Searching vector database",
+    yield _sse("progress", {"type": "step_start", "label": "Matching incident words and phrases",
                              "detail": f"top_k={request.top_k}"})
     try:
         retrieved = search_similar_incidents(query_text=user_query, top_k=request.top_k)
